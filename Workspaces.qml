@@ -41,6 +41,105 @@ BarWidget {
   readonly property bool global: root.numbering === "global"
   readonly property var labels: root.setting("labels", ({}))
 
+  // Floating workspaces show their number in another theme colour.
+  //   "floatingColor": a colour name from the theme's colors.toml ("magenta",
+  //                    "green", ...) or "#rrggbb"; "" turns the cue off.
+  readonly property string floatingColorName: String(root.setting("floatingColor", "magenta"))
+  readonly property bool floatingCue: root.floatingColorName !== ""
+  property var themeColors: ({})
+  readonly property color floatingColor: {
+    var name = root.floatingColorName
+    if (/^#[0-9a-fA-F]{6}$/.test(name)) return name
+    return root.themeColors[name] || Color.urgent
+  }
+
+  function readThemeColors(text) {
+    var next = {}
+    var lines = String(text || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var match = lines[i].match(/^\s*([A-Za-z0-9_]+)\s*=\s*"(#[0-9a-fA-F]{6})"/)
+      if (match) next[match[1]] = match[2]
+    }
+    root.themeColors = next
+  }
+
+  // omarchy-theme-set writes the current theme under ~/.local/state whatever
+  // XDG_STATE_HOME says. A theme change swaps the file, so it is read again
+  // whenever the shell's own colours change too.
+  FileView {
+    id: themeColorsFile
+    path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.readThemeColors(text())
+  }
+
+  Connections {
+    target: Color
+    function onAccentChanged() { themeColorsFile.reload() }
+    function onBackgroundChanged() { themeColorsFile.reload() }
+  }
+
+  // Workspace id -> saved layout mode, and the default for the rest, read the
+  // way omarchy-hyprland-workspace-layout-current does: Hyprland doesn't report
+  // floating, so it comes from the files the layout commands write.
+  property var modes: ({})
+  property string defaultMode: "dwindle"
+  property bool modesStale: false
+
+  function isFloating(id) {
+    var mode = root.modes[String(id)]
+    return mode ? mode === "floating" : root.defaultMode === "floating"
+  }
+
+  function readModes(text) {
+    var next = {}
+    var lines = String(text || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var fields = lines[i].trim().split(" ")
+      if (fields.length !== 2) continue
+      if (fields[0] === "default") root.defaultMode = fields[1]
+      else next[fields[0]] = fields[1]
+    }
+    root.modes = next
+  }
+
+  function refreshModes() {
+    if (!root.floatingCue) return
+    if (modesProc.running) {
+      root.modesStale = true
+      return
+    }
+    modesProc.running = true
+  }
+
+  Process {
+    id: modesProc
+    command: ["sh", "-c",
+      "d=\"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/workspace-layouts\"; " +
+      "echo \"default $(omarchy-hyprland-workspace-layout-default)\"; " +
+      "for f in \"$d\"/*.lua; do [ -e \"$f\" ] || continue; n=$(basename \"$f\" .lua); " +
+      "case $n in ''|*[!0-9]*) continue;; esac; " +
+      "m=$(sed -n 's/.*mode = \"\\([a-z]*\\)\".*/\\1/p' \"$f\"); [ -n \"$m\" ] && echo \"$n $m\"; done; true"]
+    stdout: StdioCollector {
+      onStreamFinished: root.readModes(text)
+    }
+    onExited: {
+      if (!root.modesStale) return
+      root.modesStale = false
+      Qt.callLater(root.refreshModes)
+    }
+  }
+
+  // The layout commands ask every workspaces widget to read the modes again.
+  // Each bar has an instance; whichever one holds the target relays it.
+  ShellIpc {
+    target: "omarchy.workspaces"
+
+    function refresh(): void { root.broadcast("refreshModes") }
+  }
+
   readonly property int slots: 10
 
   readonly property var monitor: {
@@ -247,13 +346,19 @@ BarWidget {
     root.bar.run(command)
   }
 
-  Component.onCompleted: rulesProc.running = true
+  Component.onCompleted: {
+    rulesProc.running = true
+    root.refreshModes()
+  }
 
   Connections {
     target: Hyprland
     function onRawEvent(event) {
       var name = event ? String(event.name) : ""
-      if (name === "configreloaded" && !rulesProc.running) rulesProc.running = true
+      if (name === "configreloaded") {
+        if (!rulesProc.running) rulesProc.running = true
+        root.refreshModes()
+      }
       // Quickshell credits every workspace switch to the focused monitor, as
       // the event doesn't say which one switched, and misses the workspace a
       // monitor falls back to when its own is moved away. Moving workspaces
@@ -298,13 +403,17 @@ BarWidget {
         Layout.leftMargin: firstGuest && !root.vertical ? Style.space(6) : 0
         Layout.topMargin: firstGuest && root.vertical ? Style.space(6) : 0
 
+        readonly property bool floating: root.floatingCue && root.isFloating(modelData)
+
         bar: root.bar
         // The shown workspace keeps its number, drawn in the theme's accent
         // colour with an accent line under it. Workspaces with windows are
-        // drawn in full, empty ones dimmed.
+        // drawn in full, empty ones dimmed. A floating workspace's number is in
+        // the floating colour, shown or not; the line stays the accent.
         text: root.label(modelData)
         active: shown
-        activeColor: Color.accent
+        activeColor: floating ? root.floatingColor : Color.accent
+        foreground: floating ? root.floatingColor : (root.bar ? root.bar.barForeground : Color.foreground)
         opacity: occupied || shown ? 1 : 0.5
         horizontalMargin: 6
         verticalPadding: 6

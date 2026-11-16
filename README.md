@@ -44,6 +44,11 @@ In the widget's entry in `~/.config/omarchy/shell.json`:
 - `scrollingLayout`: `true` (default) lets a click on the shown workspace
   cycle tiling, scrolling and floating, as Super + L does. `false` makes the
   click flip between tiling and floating only. Super + L is unaffected.
+- `floatingColor`: floating workspaces show their number in this colour,
+  whether shown or not (the active underline stays the accent). A colour name
+  from the current theme's `colors.toml` (`"magenta"` by default; also
+  `"green"`, `"yellow"`, `"cyan"`, ...) so it follows theme changes, or a
+  `"#rrggbb"` value. `""` turns the cue off.
 
 ## Global numbering on Omarchy 4.5+
 
