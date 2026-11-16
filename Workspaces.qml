@@ -30,6 +30,9 @@ BarWidget {
   //   "numbering": "auto" | "monitor" | "global"
   //   "labels":    { "10": "G" }   text for a workspace instead of its number
   //                               (keyed by id in global mode, slot otherwise)
+  //   "scrollingLayout": false    clicking the shown workspace flips between
+  //                               tiling and floating, skipping scrolling
+  readonly property bool scrollingLayout: root.setting("scrollingLayout", true) !== false
   readonly property string numbering: {
     var mode = String(root.setting("numbering", "auto"))
     if (mode === "global" || mode === "monitor") return mode
@@ -229,9 +232,15 @@ BarWidget {
   // scrolling, floating), as Super + L does. The layout commands act on the
   // focused workspace, so a click on another monitor's bar focuses that
   // monitor first.
+  //
+  // Without scrolling, it flips between tiling and floating through the same
+  // command, which only cycles: from floating, forward lands on tiling; from
+  // tiling (or scrolling), back lands on floating (or tiling).
   function cycleLayout() {
     if (!root.bar) return
-    var command = "omarchy-hyprland-workspace-layout-toggle"
+    var command = root.scrollingLayout
+      ? "omarchy-hyprland-workspace-layout-toggle"
+      : "if [ \"$(omarchy-hyprland-workspace-layout-current)\" = floating ]; then omarchy-hyprland-workspace-layout-toggle; else omarchy-hyprland-workspace-layout-toggle back; fi"
     if (root.monitor && !root.monitor.focused) {
       command = "hyprctl dispatch " + Util.shellQuote("hl.dsp.focus({ monitor = \"" + root.monitorName + "\" })") + " >/dev/null && " + command
     }

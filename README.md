@@ -32,7 +32,8 @@ In the widget's entry in `~/.config/omarchy/shell.json`:
 {
   "id": "lunardi0x01.workspaces",
   "numbering": "auto",
-  "labels": { "10": "G" }
+  "labels": { "10": "G" },
+  "scrollingLayout": false
 }
 ```
 
@@ -40,6 +41,9 @@ In the widget's entry in `~/.config/omarchy/shell.json`:
 - `labels`: text to show instead of a number. Keyed by workspace id in
   `global` mode and by slot (1-10) in `monitor` mode. Without a label,
   workspace 10 shows as `0`, matching its key.
+- `scrollingLayout`: `true` (default) lets a click on the shown workspace
+  cycle tiling, scrolling and floating, as Super + L does. `false` makes the
+  click flip between tiling and floating only. Super + L is unaffected.
 
 ## Global numbering on Omarchy 4.5+
 
