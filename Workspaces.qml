@@ -10,10 +10,34 @@ BarWidget {
   id: root
   moduleName: "omarchy.workspaces"
 
-  // Every monitor has workspaces 1-10 of its own, which Hyprland numbers in a
-  // block of ten per monitor: 1-10, 11-20, and so on (see
-  // default/hypr/monitor-workspaces.lua). Each bar shows its own monitor's block,
-  // numbered 1-10, and the one that monitor shows, whichever monitor has focus.
+  // Two numbering schemes, one widget:
+  //
+  //   "monitor"  Omarchy's per-monitor workspaces (the default since 4.5).
+  //              Every monitor has workspaces 1-10 of its own, which Hyprland
+  //              numbers in a block of ten per monitor: 1-10, 11-20, and so on
+  //              (see default/hypr/monitor-workspaces.lua). Each bar shows its
+  //              own monitor's block, numbered 1-10.
+  //
+  //   "global"   Plain Hyprland numbering, with workspaces pinned to monitors
+  //              by workspace rules (hl.workspace_rule({ workspace = "8",
+  //              monitor = "HDMI-A-1" })). Each bar shows the workspaces pinned
+  //              to its monitor, plus any other that is on it right now.
+  //
+  //   "auto"     (default) "global" when Hyprland has rules pinning numbered
+  //              workspaces to monitors, "monitor" otherwise.
+  //
+  // Settings, in this widget's shell.json entry:
+  //   "numbering": "auto" | "monitor" | "global"
+  //   "labels":    { "10": "G" }   text for a workspace instead of its number
+  //                               (keyed by id in global mode, slot otherwise)
+  readonly property string numbering: {
+    var mode = String(root.setting("numbering", "auto"))
+    if (mode === "global" || mode === "monitor") return mode
+    return root.hasPins ? "global" : "monitor"
+  }
+  readonly property bool global: root.numbering === "global"
+  readonly property var labels: root.setting("labels", ({}))
+
   readonly property int slots: 10
 
   readonly property var monitor: {
@@ -23,7 +47,40 @@ BarWidget {
   }
   readonly property string monitorName: root.monitor ? root.monitor.name : ""
 
-  // Connector -> block, from the file Hyprland keeps them in.
+  // ---- Global numbering: monitor name -> pinned workspace ids, from Hyprland's
+  // workspace rules. Read again on every config reload.
+  property var pins: ({})
+  property bool hasPins: false
+
+  function readRules(text) {
+    var next = {}
+    var any = false
+    var rules = []
+    try { rules = JSON.parse(text) } catch (e) { rules = [] }
+    for (var i = 0; i < rules.length; i++) {
+      var rule = rules[i]
+      var name = rule ? String(rule.workspaceString || "") : ""
+      if (!rule || !rule.monitor || !/^[0-9]+$/.test(name)) continue
+      var id = parseInt(name, 10)
+      if (id <= 0) continue
+      if (!next[rule.monitor]) next[rule.monitor] = []
+      if (next[rule.monitor].indexOf(id) === -1) next[rule.monitor].push(id)
+      any = true
+    }
+    root.pins = next
+    root.hasPins = any
+  }
+
+  Process {
+    id: rulesProc
+    command: ["hyprctl", "workspacerules", "-j"]
+    stdout: StdioCollector {
+      onStreamFinished: root.readRules(text)
+    }
+  }
+
+  // ---- Per-monitor numbering: connector -> block, from the file Hyprland keeps
+  // them in.
   property var blocks: ({})
 
   function readBlocks(text) {
@@ -75,10 +132,37 @@ BarWidget {
     return null
   }
 
-  // All ten of the monitor's own. After
-  // them come workspaces that are only visiting: those of a monitor that is
-  // unplugged, which had no room to join this one's.
-  function workspaceIds() {
+  function isGuest(id) {
+    return !root.global && root.blockOf(id) !== root.block
+  }
+
+  // Global: the workspaces pinned to this monitor, except one that is on
+  // another monitor right now (a script moved it there), and any other
+  // workspace that is on this monitor.
+  function globalIds() {
+    var ids = []
+    var pinned = root.pins[root.monitorName] || []
+
+    for (var p = 0; p < pinned.length; p++) {
+      var workspace = root.workspaceById(pinned[p])
+      var elsewhere = workspace !== null && workspace.monitor !== null && workspace.monitor.name !== root.monitorName
+      if (!elsewhere) ids.push(pinned[p])
+    }
+
+    var values = Hyprland.workspaces.values
+    for (var i = 0; i < values.length; i++) {
+      var id = values[i].id
+      if (id > 0 && values[i].monitor && values[i].monitor.name === root.monitorName && ids.indexOf(id) === -1) ids.push(id)
+    }
+
+    ids.sort(function(left, right) { return left - right })
+    return ids
+  }
+
+  // Per monitor: all ten of the monitor's own. After them come workspaces that
+  // are only visiting: those of a monitor that is unplugged, which had no room
+  // to join this one's.
+  function monitorIds() {
     var base = root.block * root.slots
     var ids = []
     for (var s = 1; s <= root.slots; s++) ids.push(base + s)
@@ -100,12 +184,23 @@ BarWidget {
     return ids.concat(guests)
   }
 
+  function workspaceIds() {
+    return root.global ? root.globalIds() : root.monitorIds()
+  }
+
+  function label(id) {
+    var key = root.global || root.isGuest(id) ? id : root.slotOf(id)
+    var custom = root.labels ? root.labels[String(key)] : undefined
+    if (custom !== undefined && custom !== null && custom !== "") return String(custom)
+    return key === root.slots ? "0" : String(key)
+  }
+
   function dispatch(expression) {
     if (root.bar) root.bar.run("hyprctl dispatch " + Util.shellQuote(expression))
   }
 
   function focusWorkspace(id) {
-    if (root.blockOf(id) === root.block) {
+    if (!root.global && root.blockOf(id) === root.block) {
       root.dispatch("o.workspaces.focus(" + root.slotOf(id) + ", \"" + root.monitorName + "\")")
     } else {
       root.dispatch("hl.dsp.focus({ workspace = \"" + id + "\" })")
@@ -130,53 +225,10 @@ BarWidget {
     if (target !== ids[index]) root.focusWorkspace(target)
   }
 
-  // The workspace each monitor shows carries its layout: a square tiles, a
-  // circle scrolls, and a triangle floats. Clicking it cycles to the next one,
-  // as Super + L does.
-  property string activeMode: "dwindle"
-  property bool modeStale: false
-
-  function modeGlyph(mode) {
-    if (mode === "scrolling") return "󰝥"
-    if (mode === "floating") return "󰔶"
-    return "󱓻"
-  }
-
-  // A layout only changes through the layout commands, which ask for a refresh,
-  // or a config reload, so each workspace's mode is read once and cached rather
-  // than running the script on every workspace switch.
-  property var modeCache: ({})
-  property int modeGeneration: 0
-  property int modeProcWorkspace: -1
-  property int modeProcGeneration: 0
-
-  function showActiveMode() {
-    var mode = root.modeCache[root.activeWorkspaceId()]
-    if (mode !== undefined) root.activeMode = mode
-    else readMode()
-  }
-
-  function readMode() {
-    if (modeProc.running) {
-      root.modeStale = true
-      return
-    }
-    var id = root.activeWorkspaceId()
-    if (id === -1) return
-    root.modeProcWorkspace = id
-    root.modeProcGeneration = root.modeGeneration
-    modeProc.command = ["omarchy-hyprland-workspace-layout-current", String(id)]
-    modeProc.running = true
-  }
-
-  function refresh() {
-    root.modeCache = ({})
-    root.modeGeneration++
-    readMode()
-  }
-
-  // The layout commands act on the focused workspace, so a click on another
-  // monitor's bar focuses that monitor first.
+  // Clicking the workspace a monitor shows cycles its layout (tiling,
+  // scrolling, floating), as Super + L does. The layout commands act on the
+  // focused workspace, so a click on another monitor's bar focuses that
+  // monitor first.
   function cycleLayout() {
     if (!root.bar) return
     var command = "omarchy-hyprland-workspace-layout-toggle"
@@ -186,19 +238,13 @@ BarWidget {
     root.bar.run(command)
   }
 
-  Component.onCompleted: refresh()
-  onMonitorChanged: root.showActiveMode()
-
-  Connections {
-    target: root.monitor
-    function onActiveWorkspaceChanged() { root.showActiveMode() }
-  }
+  Component.onCompleted: rulesProc.running = true
 
   Connections {
     target: Hyprland
     function onRawEvent(event) {
       var name = event ? String(event.name) : ""
-      if (name === "configreloaded") root.refresh()
+      if (name === "configreloaded" && !rulesProc.running) rulesProc.running = true
       // Quickshell credits every workspace switch to the focused monitor, as
       // the event doesn't say which one switched, and misses the workspace a
       // monitor falls back to when its own is moved away. Moving workspaces
@@ -211,33 +257,6 @@ BarWidget {
         Hyprland.refreshWorkspaces()
       }
     }
-  }
-
-  Process {
-    id: modeProc
-    stdout: StdioCollector {
-      onStreamFinished: {
-        var mode = text.trim()
-        // A read that started before a refresh may predate the change.
-        if (!mode || root.modeProcGeneration !== root.modeGeneration) return
-        root.modeCache[root.modeProcWorkspace] = mode
-        if (root.modeProcWorkspace === root.activeWorkspaceId()) root.activeMode = mode
-      }
-    }
-    onExited: {
-      if (!root.modeStale) return
-      root.modeStale = false
-      // Deferred: the process still reports running while it signals exit.
-      Qt.callLater(root.showActiveMode)
-    }
-  }
-
-  // Super + L and the default layout change the mode without a focus change,
-  // so they ask every bar to read it again.
-  ShellIpc {
-    target: "omarchy.workspaces"
-
-    function refresh(): void { root.broadcast("refresh") }
   }
 
   readonly property real trailingGap: root.vertical ? 0 : Style.spaceReal(1.5)
@@ -257,27 +276,36 @@ BarWidget {
       model: root.workspaceIds()
 
       WidgetButton {
+        id: button
         required property int modelData
+        required property int index
 
         readonly property var workspace: root.workspaceById(modelData)
         readonly property bool occupied: workspace !== null && workspace.toplevels.values.length > 0
         readonly property bool shown: root.monitor !== null && root.monitor.activeWorkspace !== null && root.monitor.activeWorkspace.id === modelData
-        readonly property int slot: root.slotOf(modelData)
-        readonly property bool firstGuest: root.blockOf(modelData) !== root.block && index > 0 && root.blockOf(root.workspaceIds()[index - 1]) === root.block
-        required property int index
+        readonly property bool firstGuest: root.isGuest(modelData) && index > 0 && !root.isGuest(root.workspaceIds()[index - 1])
 
         // A gap sets visiting workspaces apart from the monitor's own.
         Layout.leftMargin: firstGuest && !root.vertical ? Style.space(6) : 0
         Layout.topMargin: firstGuest && root.vertical ? Style.space(6) : 0
 
-        id: button
         bar: root.bar
         // The shown workspace keeps its number, drawn in the theme's accent
-        // colour with an accent line under it.
-        text: slot === root.slots ? "0" : String(slot)
+        // colour with an accent line under it. Workspaces with windows are
+        // drawn in full, empty ones dimmed.
+        text: root.label(modelData)
         active: shown
         activeColor: Color.accent
         opacity: occupied || shown ? 1 : 0.5
+        horizontalMargin: 6
+        verticalPadding: 6
+        fixedWidth: root.vertical ? root.barSize : Style.space(20)
+        fixedHeight: root.barSize
+        onPressed: function() {
+          if (shown) root.cycleLayout()
+          else root.focusWorkspace(modelData)
+        }
+        onWheelMoved: function(delta) { root.scrollWorkspaces(delta) }
 
         // Not rounded to a whole pixel: on a scaled display that rounding
         // pushes the line visibly off the centred number.
@@ -290,15 +318,6 @@ BarWidget {
           x: (button.width - width) / 2
           y: Math.round(button.height / 2 + button.fontSize * 0.75)
         }
-        horizontalMargin: 6
-        verticalPadding: 6
-        fixedWidth: root.vertical ? root.barSize : Style.space(20)
-        fixedHeight: root.barSize
-        onPressed: function() {
-          if (shown) root.cycleLayout()
-          else root.focusWorkspace(modelData)
-        }
-        onWheelMoved: function(delta) { root.scrollWorkspaces(delta) }
       }
     }
   }
